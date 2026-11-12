@@ -1,0 +1,201 @@
+import fs from "node:fs"
+import path from "node:path"
+
+import {
+  createOpenAICompatibleImageProvider,
+  dataURI,
+  downloadAsBase64,
+  errorResponse,
+  imageRefs,
+  jsonResponse,
+  normalizeMime,
+  parseDataURI,
+  pollUntil,
+  readImageRequest,
+  requestFields,
+  requestFiles,
+  resolutionFor,
+  sizeInfo,
+} from "../common.mjs"
+
+const PROVIDER = "image-models/wavespeed"
+const BASE = "https://api.wavespeed.ai"
+const MODELS = [
+  ["black-forest-labs/flux-3/text-to-image", "FLUX 3 Text-to-Image"],
+  ["black-forest-labs/flux-3/image-edit", "FLUX 3 Image Edit"],
+  ["ideogram-ai/ideogram-v4.5", "Ideogram 4.5"],
+  ["ideogram-ai/ideogram-v4.5/edit", "Ideogram 4.5 Edit"],
+  ["bytedance/seedream-v5.5", "Seedream 5.5"],
+  ["bytedance/seedream-v5.5/edit", "Seedream 5.5 Edit"],
+  ["minimax/h3-image/text-to-image", "H3 Image"],
+  ["minimax/h3-image/edit", "H3 Image Edit"],
+]
+
+const EDIT_TARGETS = {
+  "black-forest-labs/flux-3/text-to-image": "black-forest-labs/flux-3/image-edit",
+  "ideogram-ai/ideogram-v4.5": "ideogram-ai/ideogram-v4.5/edit",
+  "bytedance/seedream-v5.5": "bytedance/seedream-v5.5/edit",
+  "minimax/h3-image/text-to-image": "minimax/h3-image/edit",
+}
+
+function endpointFor(model, hasImages) {
+  if (hasImages && EDIT_TARGETS[model]) return EDIT_TARGETS[model]
+  return model
+}
+
+function modelKind(model) {
+  if (model.includes("ideogram")) return "ideogram"
+  if (model.includes("seedream")) return "seedream"
+  if (model.includes("h3-image")) return "h3"
+  return "flux"
+}
+
+function allowedResolutions(model) {
+  const kind = modelKind(model)
+  if (kind === "seedream" || kind === "ideogram") return ["1K", "2K"]
+  return ["1K", "2K", "4K"]
+}
+
+async function httpJSON(url, key, { method = "GET", body, signal } = {}) {
+  const response = await fetch(url, {
+    method,
+    headers: {
+      authorization: `Bearer ${key}`,
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
+  })
+  const text = await response.text()
+  let value
+  try {
+    value = text ? JSON.parse(text) : {}
+  } catch {
+    throw new Error(`WaveSpeed returned HTTP ${response.status} with non-JSON output`)
+  }
+  if (!response.ok) throw new Error(`WaveSpeed returned HTTP ${response.status}: ${value.message || value.error?.message || "request failed"}`)
+  if (value.code !== undefined && value.code !== 200) throw new Error(`WaveSpeed returned code ${value.code}: ${value.message || "request failed"}`)
+  return value.data ?? value
+}
+
+async function upload(base, key, bytes, name, mime, signal) {
+  const contentType = normalizeMime(mime) || "application/octet-stream"
+  const ticket = await httpJSON(`${base}/api/v3/media/uploads`, key, {
+    method: "POST",
+    body: { filename: name || "image", size: bytes.length, content_type: contentType },
+    signal,
+  })
+  const uploadURL = ticket.upload?.url
+  const outputURL = ticket.download_url
+  const headers = ticket.upload?.headers
+  if (!uploadURL || !outputURL || !headers || typeof headers !== "object") throw new Error("WaveSpeed returned an invalid upload ticket")
+  const response = await fetch(uploadURL, { method: "PUT", headers, body: bytes, signal })
+  if (!response.ok) throw new Error(`WaveSpeed upload returned HTTP ${response.status}`)
+  return outputURL
+}
+
+async function resolveRefs(refs, base, key, signal) {
+  const out = []
+  for (const ref of refs) {
+    if (ref.kind === "bytes") {
+      out.push(await upload(base, key, ref.bytes, ref.name, ref.mime, signal))
+      continue
+    }
+    const value = String(ref.value || "")
+    if (value.startsWith("https://")) {
+      out.push(value)
+      continue
+    }
+    const parsed = parseDataURI(value)
+    if (parsed) {
+      out.push(await upload(base, key, parsed.bytes, "reference", parsed.mime, signal))
+      continue
+    }
+    if (value.startsWith("http://")) throw Object.assign(new Error("WaveSpeed requires HTTPS reference URLs"), { status: 400 })
+    const file = path.resolve(value)
+    if (!fs.existsSync(file)) throw Object.assign(new Error("reference image file does not exist"), { status: 400 })
+    const bytes = new Uint8Array(fs.readFileSync(file))
+    out.push(await upload(base, key, bytes, path.basename(file), mimeOf(file), signal))
+  }
+  return out
+}
+
+function mimeOf(file) {
+  const ext = path.extname(file).toLowerCase()
+  return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif" })[ext] || "application/octet-stream"
+}
+
+function buildBody(model, fields, urls) {
+  const kind = modelKind(model)
+  const body = { prompt: String(fields.prompt || "") }
+  if (!body.prompt.trim()) throw Object.assign(new Error("prompt is required"), { status: 400 })
+  const size = sizeInfo(fields.size)
+  const aspect = fields.aspect_ratio || fields.aspectRatio || size?.aspect
+  if (aspect) body.aspect_ratio = aspect
+  const resolution = resolutionFor(fields.resolution || fields.size, allowedResolutions(model), "1K")
+  if (resolution) body.resolution = resolution.toLowerCase()
+  if (fields.output_format) body.output_format = fields.output_format
+  if (kind === "ideogram" && fields.quality) body.quality = fields.quality
+  if (kind === "seedream" && fields.background) body.background = fields.background
+  if (kind === "ideogram" && urls.length) {
+    body.image = urls[0]
+    if (urls.length > 1) body.reference_images = urls.slice(1)
+    if (fields.mask_url) body.mask_url = fields.mask_url
+    if (fields.edit_precision) body.edit_precision = fields.edit_precision
+  } else if (urls.length) {
+    body.images = urls
+  }
+  return body
+}
+
+function outputURLs(value) {
+  const rows = Array.isArray(value.outputs) ? value.outputs : []
+  return rows.map((row) => typeof row === "string" ? row : row?.url).filter(Boolean)
+}
+
+async function generate({ requestURL, init, key, provider, base }) {
+  const request = await readImageRequest(requestURL, init)
+  if (!request.path.endsWith("/images/generations") && !request.path.endsWith("/images/edits")) {
+    return errorResponse(404, `${provider} serves only /images/generations and /images/edits`)
+  }
+  if ((init.method || "POST").toUpperCase() !== "POST") return errorResponse(405, "use POST to generate an image")
+  const fields = requestFields(request)
+  const requestedModel = String(fields.model || "").trim()
+  if (!MODELS.some(([id]) => id === requestedModel)) return errorResponse(400, `choose one of the ${provider} models`)
+  const refs = imageRefs(fields, requestFiles(request))
+  const model = endpointFor(requestedModel, refs.length > 0)
+  if (model.endsWith("/edit") && !refs.length) return errorResponse(400, "WaveSpeed edit models require a reference image")
+  const urls = await resolveRefs(refs, base, key, init.signal)
+  const body = buildBody(model, fields, urls)
+  const submitted = await httpJSON(`${base}/api/v3/${model}`, key, { method: "POST", body, signal: init.signal })
+  const taskId = submitted.id
+  if (!taskId) throw new Error("WaveSpeed returned no prediction id")
+  const result = await pollUntil({
+    signal: init.signal,
+    get: () => httpJSON(`${base}/api/v3/predictions/${encodeURIComponent(taskId)}/result`, key, { signal: init.signal }),
+    done: (value) => String(value.status || "").toLowerCase() === "completed",
+    failed: (value) => ["failed", "cancelled", "canceled", "timeout", "deleted"].includes(String(value.status || "").toLowerCase())
+      ? String(value.error || value.status)
+      : "",
+  })
+  const urlsOut = outputURLs(result)
+  if (!urlsOut.length) throw new Error("WaveSpeed completed without an image output")
+  const data = []
+  for (const url of urlsOut) data.push(await downloadAsBase64(url, {}, init.signal))
+  return jsonResponse({ created: Math.floor(Date.now() / 1000), data })
+}
+
+export async function WaveSpeedImages(input, options = {}) {
+  return provider(input, options)
+}
+
+const provider = createOpenAICompatibleImageProvider({
+  id: PROVIDER,
+  name: "WaveSpeed Images",
+  base: BASE,
+  models: MODELS,
+  generate,
+  label: "WaveSpeed API key",
+  labelZh: "WaveSpeed API Key",
+})

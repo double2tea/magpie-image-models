@@ -1,0 +1,41 @@
+{
+  "name": "magpie-image-models",
+  "version": "0.3.0",
+  "description": "One Magpie plugin package for independent image provider accounts and models.",
+  "type": "module",
+  "main": "index.mjs",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "index.mjs",
+    "common.mjs",
+    "providers/"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/double2tea/magpie-image-models.git"
+  },
+  "homepage": "https://github.com/double2tea/magpie-image-models",
+  "bugs": {
+    "url": "https://github.com/double2tea/magpie-image-models/issues"
+  },
+  "scripts": {
+    "test": "node --test index.test.mjs"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "magpie-plugin",
+    "image-generation",
+    "image-editing"
+  ],
+  "magpie": {
+    "name": "Image Models",
+    "summary": {
+      "en": "Independent image provider accounts through Magpie's ordinary image tool.",
+      "zh": "通过 Magpie 普通图片工具使用独立图片供应商账户与模型。"
+    }
+  }
+}
