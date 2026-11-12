@@ -3,6 +3,7 @@ import {
   dataURI,
   downloadAsBase64,
   errorResponse,
+  fileByField,
   imageRefs,
   jsonResponse,
   maskFile,
@@ -11,23 +12,13 @@ import {
   requestFields,
   requestFiles,
   sizeInfo,
+  validateImageRequest,
 } from "../common.mjs"
+import { modelCapabilities, modelEntries } from "../catalog.mjs"
 
 const PROVIDER = "image-models/twelveai"
 const BASE = "https://cdn.12ai.org"
-const MODELS = [
-  ["gemini-nano-banana-2.1", "Nano Banana 2.1"],
-  ["gemini-3.1-flash-image-preview", "Nano Banana 2 Preview"],
-  ["gemini-3.1-flash-image", "Nano Banana 2"],
-  ["gemini-3.1-flash-lite-image", "Nano Banana Lite"],
-  ["gemini-3-pro-image-preview", "Nano Banana Pro Preview"],
-  ["gemini-3-pro-image", "Nano Banana Pro"],
-  ["gpt-image-2.6-flare", "GPT Image 2.6 Flare"],
-  ["gpt-image-2.6-sunburst", "GPT Image 2.6 Sunburst"],
-  ["gpt-image-2.5-flare", "GPT Image 2.5 Flare"],
-  ["gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst"],
-  ["gpt-image-2", "GPT Image 2"],
-]
+const MODELS = modelEntries(PROVIDER).map(([id, name]) => [id, name, modelCapabilities(PROVIDER, id)])
 
 function isGemini(model) {
   return model.startsWith("gemini-")
@@ -62,6 +53,10 @@ function buildInput(fields, files, model) {
     }
     const mask = maskFile(files)
     if (mask) input.mask = dataURI(mask.bytes, mask.mime)
+    else if (typeof fields.mask === "string" && fields.mask) input.mask = fields.mask
+    const markup = fileByField(files, "markup")
+    if (markup) input.markup = dataURI(markup.bytes, markup.mime)
+    else if (typeof fields.markup === "string" && fields.markup) input.markup = fields.markup
   }
   if (fields.n !== undefined && input.n === undefined) {
     const value = Number(fields.n)
@@ -126,7 +121,10 @@ async function generate({ requestURL, init, key, provider, base }) {
   const fields = requestFields(request)
   const model = String(fields.model || "").trim()
   if (!MODELS.some(([id]) => id === model)) return errorResponse(400, `choose one of the ${provider} models`)
-  const input = buildInput(fields, requestFiles(request), model)
+  const files = requestFiles(request)
+  const capabilities = modelCapabilities(provider, model)
+  validateImageRequest({ provider, model, fields, files, capabilities })
+  const input = buildInput(fields, files, model)
   const submitted = await postJSON(`${base}/v1/task/submit`, key, { model, input }, init.signal)
   const taskId = submitted.id || submitted.task_id
   if (!taskId) throw new Error("12ai returned no task id")

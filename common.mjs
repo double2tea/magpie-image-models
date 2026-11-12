@@ -135,6 +135,23 @@ export function requestFiles(request) {
   return Array.isArray(request.files) ? request.files : []
 }
 
+export function fileByField(files, field) {
+  return files.find((file) => file.field === field) || null
+}
+
+function listValue(value) {
+  if (Array.isArray(value)) return value
+  if (typeof value !== "string") return [value]
+  const text = value.trim()
+  if (!text.startsWith("[")) return [value]
+  try {
+    const parsed = JSON.parse(text)
+    return Array.isArray(parsed) ? parsed : [value]
+  } catch {
+    return [value]
+  }
+}
+
 export function imageRefs(fields, files) {
   const refs = []
   for (const file of files) {
@@ -145,7 +162,7 @@ export function imageRefs(fields, files) {
   for (const key of ["images", "image", "reference_images"]) {
     const value = fields[key]
     if (value == null) continue
-    for (const item of Array.isArray(value) ? value : [value]) {
+    for (const item of listValue(value)) {
       if (typeof item === "string") refs.push({ kind: "value", value: item })
       else if (item && typeof item.url === "string") refs.push({ kind: "value", value: item.url })
     }
@@ -175,11 +192,97 @@ export function sizeInfo(value) {
 
 export function resolutionFor(value, allowed, fallback = "") {
   const info = sizeInfo(value)
-  let tier = info?.tier || String(value || "").toUpperCase()
-  if (tier === "1K" || tier === "2K" || tier === "4K") {
-    return allowed.includes(tier) ? tier : allowed[allowed.length - 1] || fallback
+  const tier = String(info?.tier || value || "").trim().toUpperCase()
+  const match = allowed.find((item) => String(item).toUpperCase() === tier)
+  return match || fallback
+}
+
+export function validateImageRequest({ provider, model, fields, files, capabilities }) {
+  if (!capabilities) throw Object.assign(new Error(`unknown model for ${provider}: ${model}`), { status: 400 })
+  if (!String(fields.prompt || "").trim()) throw Object.assign(new Error("prompt is required"), { status: 400 })
+  const refs = imageRefs(fields, files)
+  const hasMask = Boolean(fileByField(files, "mask") || fields.mask || fields.mask_url)
+  const hasMarkup = Boolean(fileByField(files, "markup") || fields.markup)
+  if (!capabilities.generate && !refs.length) {
+    throw Object.assign(new Error(`${provider} model ${model} is an edit-only endpoint`), { status: 400 })
   }
-  return fallback
+  if (refs.length && !capabilities.edit) {
+    throw Object.assign(new Error(`${provider} model ${model} does not support reference editing`), { status: 400 })
+  }
+  const referenceLimit = hasMask && capabilities.maskReferencesMax != null
+    ? capabilities.maskReferencesMax
+    : capabilities.maxReferences
+  if (referenceLimit != null && refs.length > referenceLimit) {
+    throw Object.assign(new Error(`${provider} model ${model} accepts at most ${referenceLimit} reference images`), { status: 400 })
+  }
+  if (hasMask && !capabilities.mask) {
+    throw Object.assign(new Error(`${provider} model ${model} does not support mask editing`), { status: 400 })
+  }
+  if (hasMarkup && !capabilities.markup) {
+    throw Object.assign(new Error(`${provider} model ${model} does not support markup editing`), { status: 400 })
+  }
+  if (hasMarkup && !refs.length) {
+    throw Object.assign(new Error("markup editing requires a reference image"), { status: 400 })
+  }
+  if (hasMarkup && hasMask) {
+    throw Object.assign(new Error("markup and mask cannot be combined"), { status: 400 })
+  }
+  if (fields.output_format) {
+    const format = String(fields.output_format).toLowerCase()
+    if (Array.isArray(capabilities.outputFormats) && !capabilities.outputFormats.includes(format)) {
+      throw Object.assign(new Error(`${provider} model ${model} does not support output_format ${fields.output_format}`), { status: 400 })
+    }
+  }
+  if (fields.quality && Array.isArray(capabilities.qualities) && !capabilities.qualities.includes(String(fields.quality))) {
+    throw Object.assign(new Error(`${provider} model ${model} does not support quality ${fields.quality}`), { status: 400 })
+  }
+  if (fields.background && Array.isArray(capabilities.backgrounds) && !capabilities.backgrounds.includes(String(fields.background))) {
+    throw Object.assign(new Error(`${provider} model ${model} does not support background ${fields.background}`), { status: 400 })
+  }
+  if (fields.edit_precision && Array.isArray(capabilities.editPrecision) && !capabilities.editPrecision.includes(String(fields.edit_precision))) {
+    throw Object.assign(new Error(`${provider} model ${model} does not support edit_precision ${fields.edit_precision}`), { status: 400 })
+  }
+  if (fields.enable_prompt_expansion !== undefined && capabilities.promptExpansion !== true) {
+    throw Object.assign(new Error(`${provider} model ${model} does not support prompt expansion`), { status: 400 })
+  }
+  if (Array.isArray(capabilities.resolutions)) {
+    const info = sizeInfo(fields.size)
+    const requested = String(fields.resolution || fields.image_size || fields.imageSize || info?.tier || "").toUpperCase()
+    if (requested && !capabilities.resolutions.some((item) => String(item).toUpperCase() === requested)) {
+      throw Object.assign(new Error(`${provider} model ${model} supports resolutions ${capabilities.resolutions.join(", ")}`), { status: 400 })
+    }
+  }
+  if (Array.isArray(capabilities.aspectRatios)) {
+    const info = sizeInfo(fields.size)
+    const requested = String(fields.aspect_ratio || fields.aspectRatio || info?.aspect || "")
+    if (requested && !capabilities.aspectRatios.includes(requested)) {
+      throw Object.assign(new Error(`${provider} model ${model} does not support aspect ratio ${requested}`), { status: 400 })
+    }
+  }
+  if (fields.edit_precision === "high" && capabilities.omitAspectRatioWithHighPrecision && fields.aspect_ratio) {
+    throw Object.assign(new Error(`${provider} model ${model} requires omitting aspect_ratio with high edit precision`), { status: 400 })
+  }
+  if (hasMask && capabilities.omitAspectRatioWithMask && fields.aspect_ratio) {
+    throw Object.assign(new Error(`${provider} model ${model} requires omitting aspect_ratio with a mask`), { status: 400 })
+  }
+  if (fields.output_format && String(fields.output_format).toLowerCase() === "gif") {
+    if (!capabilities.gif) throw Object.assign(new Error(`${provider} model ${model} does not support GIF output`), { status: 400 })
+    if (refs.length) throw Object.assign(new Error("GIF output does not support reference images"), { status: 400 })
+    if (fields.background === "transparent") throw Object.assign(new Error("GIF output does not support a transparent background"), { status: 400 })
+    for (const [key, lower, upper] of [["frame_count", 2, 16], ["frame_duration_ms", 20, 2000]]) {
+      if (fields[key] === undefined) continue
+      const value = Number(fields[key])
+      if (!Number.isInteger(value) || value < lower || value > upper) {
+        throw Object.assign(new Error(`${key} must be an integer from ${lower} to ${upper}`), { status: 400 })
+      }
+    }
+  } else if (fields.frame_count !== undefined || fields.frame_duration_ms !== undefined) {
+    throw Object.assign(new Error("frame_count and frame_duration_ms require GIF output"), { status: 400 })
+  }
+  if (fields.background === "transparent" && fields.output_format && String(fields.output_format).toLowerCase() !== "png") {
+    throw Object.assign(new Error("transparent background requires PNG output"), { status: 400 })
+  }
+  return refs
 }
 
 export function sleep(ms, signal) {
@@ -226,7 +329,7 @@ export async function downloadAsBase64(url, headers = {}, signal) {
   return { b64_json: Buffer.from(bytes).toString("base64"), media_type: mime }
 }
 
-export function imageModel(id, name) {
+export function imageModel(id, name, capabilities) {
   return {
     name,
     reasoning: false,
@@ -237,6 +340,7 @@ export function imageModel(id, name) {
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
     variants: {},
     provider: { npm: "@ai-sdk/openai-compatible" },
+    capabilities,
   }
 }
 
@@ -257,7 +361,7 @@ export function createOpenAICompatibleImageProvider({
   const authLabelZh = labelZh || authLabel
   return async function ImageProvider(_input, options = {}) {
     const api = typeof options.baseURL === "string" && options.baseURL ? options.baseURL : base
-    const catalog = Object.fromEntries(models.map(([modelId, modelName]) => [modelId, imageModel(modelId, modelName)]))
+    const catalog = Object.fromEntries(models.map(([modelId, modelName, capabilities]) => [modelId, imageModel(modelId, modelName, capabilities)]))
     return {
       config: async (cfg) => {
         cfg.provider ??= {}

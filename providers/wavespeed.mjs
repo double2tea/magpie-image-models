@@ -6,6 +6,7 @@ import {
   dataURI,
   downloadAsBase64,
   errorResponse,
+  fileByField,
   imageRefs,
   jsonResponse,
   normalizeMime,
@@ -16,30 +17,17 @@ import {
   requestFiles,
   resolutionFor,
   sizeInfo,
+  validateImageRequest,
 } from "../common.mjs"
+import { modelCapabilities, modelEntries } from "../catalog.mjs"
 
 const PROVIDER = "image-models/wavespeed"
 const BASE = "https://api.wavespeed.ai"
-const MODELS = [
-  ["black-forest-labs/flux-3/text-to-image", "FLUX 3 Text-to-Image"],
-  ["black-forest-labs/flux-3/image-edit", "FLUX 3 Image Edit"],
-  ["ideogram-ai/ideogram-v4.5", "Ideogram 4.5"],
-  ["ideogram-ai/ideogram-v4.5/edit", "Ideogram 4.5 Edit"],
-  ["bytedance/seedream-v5.5", "Seedream 5.5"],
-  ["bytedance/seedream-v5.5/edit", "Seedream 5.5 Edit"],
-  ["minimax/h3-image/text-to-image", "H3 Image"],
-  ["minimax/h3-image/edit", "H3 Image Edit"],
-]
-
-const EDIT_TARGETS = {
-  "black-forest-labs/flux-3/text-to-image": "black-forest-labs/flux-3/image-edit",
-  "ideogram-ai/ideogram-v4.5": "ideogram-ai/ideogram-v4.5/edit",
-  "bytedance/seedream-v5.5": "bytedance/seedream-v5.5/edit",
-  "minimax/h3-image/text-to-image": "minimax/h3-image/edit",
-}
+const MODELS = modelEntries(PROVIDER).map(([id, name]) => [id, name, modelCapabilities(PROVIDER, id)])
 
 function endpointFor(model, hasImages) {
-  if (hasImages && EDIT_TARGETS[model]) return EDIT_TARGETS[model]
+  const editModel = modelCapabilities(PROVIDER, model).editModel
+  if (hasImages && editModel) return editModel
   return model
 }
 
@@ -51,9 +39,7 @@ function modelKind(model) {
 }
 
 function allowedResolutions(model) {
-  const kind = modelKind(model)
-  if (kind === "seedream" || kind === "ideogram") return ["1K", "2K"]
-  return ["1K", "2K", "4K"]
+  return modelCapabilities(PROVIDER, model).resolutions || []
 }
 
 async function httpJSON(url, key, { method = "GET", body, signal } = {}) {
@@ -121,6 +107,18 @@ async function resolveRefs(refs, base, key, signal) {
   return out
 }
 
+async function resolveImage(value, base, key, signal) {
+  if (value == null || value === "") return ""
+  const text = String(value)
+  if (text.startsWith("https://")) return text
+  const parsed = parseDataURI(text)
+  if (parsed) return upload(base, key, parsed.bytes, "mask", parsed.mime, signal)
+  if (text.startsWith("http://")) throw Object.assign(new Error("WaveSpeed requires HTTPS image URLs"), { status: 400 })
+  const file = path.resolve(text)
+  if (!fs.existsSync(file)) throw Object.assign(new Error("image file does not exist"), { status: 400 })
+  return upload(base, key, new Uint8Array(fs.readFileSync(file)), path.basename(file), mimeOf(file), signal)
+}
+
 function mimeOf(file) {
   const ext = path.extname(file).toLowerCase()
   return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif" })[ext] || "application/octet-stream"
@@ -136,6 +134,7 @@ function buildBody(model, fields, urls) {
   const resolution = resolutionFor(fields.resolution || fields.size, allowedResolutions(model), "1K")
   if (resolution) body.resolution = resolution.toLowerCase()
   if (fields.output_format) body.output_format = fields.output_format
+  if (fields.enable_prompt_expansion !== undefined) body.enable_prompt_expansion = fields.enable_prompt_expansion === true || fields.enable_prompt_expansion === "true"
   if (kind === "ideogram" && fields.quality) body.quality = fields.quality
   if (kind === "seedream" && fields.background) body.background = fields.background
   if (kind === "ideogram" && urls.length) {
@@ -163,11 +162,16 @@ async function generate({ requestURL, init, key, provider, base }) {
   const fields = requestFields(request)
   const requestedModel = String(fields.model || "").trim()
   if (!MODELS.some(([id]) => id === requestedModel)) return errorResponse(400, `choose one of the ${provider} models`)
-  const refs = imageRefs(fields, requestFiles(request))
+  const files = requestFiles(request)
+  const refs = imageRefs(fields, files)
   const model = endpointFor(requestedModel, refs.length > 0)
-  if (model.endsWith("/edit") && !refs.length) return errorResponse(400, "WaveSpeed edit models require a reference image")
+  const capabilities = modelCapabilities(provider, model)
+  validateImageRequest({ provider, model, fields, files, capabilities })
   const urls = await resolveRefs(refs, base, key, init.signal)
   const body = buildBody(model, fields, urls)
+  const mask = fileByField(files, "mask")
+  if (mask) body.mask_url = await resolveImage(dataURI(mask.bytes, mask.mime), base, key, init.signal)
+  else if (fields.mask_url) body.mask_url = await resolveImage(fields.mask_url, base, key, init.signal)
   const submitted = await httpJSON(`${base}/api/v3/${model}`, key, { method: "POST", body, signal: init.signal })
   const taskId = submitted.id
   if (!taskId) throw new Error("WaveSpeed returned no prediction id")

@@ -1,6 +1,9 @@
+import { modelCapabilities } from "../catalog.mjs"
+
 const PROVIDER = "image-models/rightimage"
 const MODEL = "gemini-nano-banana-2.1"
 const DEFAULT_BASE = "https://api.site/v1beta"
+const CAPABILITIES = modelCapabilities(PROVIDER, MODEL)
 
 const text = {
   en: "Right Code API key (rightapi.io)",
@@ -50,6 +53,7 @@ async function RightImageProvider(input, options, provider) {
             name: "Nano Banana 2.1",
             modalities: { input: ["text", "image"], output: ["text", "image"] },
             limit: { context: 65536, output: 32768 },
+            capabilities: CAPABILITIES,
           },
         },
       }
