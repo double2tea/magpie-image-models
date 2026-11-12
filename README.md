@@ -11,9 +11,24 @@ magpie plugin login image-models/twelveai
 magpie plugin login image-models/wavespeed
 ```
 
-发布版本固定在 `v0.3.0`。登录时 Magpie 只询问该渠道的 API Key，并沿用
+发布版本固定在 `v0.3.1`。登录时 Magpie 只询问该渠道的 API Key，并沿用
 Magpie 自己的凭据存储。插件不读取环境变量、Keychain、私有配置文件或本机
 路径。只使用一个渠道时，只登录该渠道。
+
+插件不附带共享账号、公共 Key 或免费额度。每个用户使用自己的供应商账号，
+生成费用由对应账号结算；可用模型、地区限制、试用额度和支付方式以供应商
+当前页面为准。
+
+## 开通渠道
+
+| Provider ID | 公开服务 | 开通方式 |
+|---|---|---|
+| `image-models/rightimage` | [Right Code](https://rightapi.io/register) | 注册并充值后，在控制台「令牌管理」创建绑定图片渠道的 API Key。接口域名是 `api.site`，`RightImage` 只是沿用旧 provider ID。 |
+| `image-models/twelveai` | [12AI](https://new.12ai.org/register) | 注册、充值，然后在[令牌管理](https://new.12ai.org/console/token)创建 `sk-` Key。模型可用性取决于账号分组和当前站点目录。 |
+| `image-models/wavespeed` | [WaveSpeedAI](https://wavespeed.ai/sign-in) | 登录后打开 [API Keys](https://wavespeed.ai/accesskey) 生成 `wsk_` Key；按实际任务用量结算。 |
+
+登录命令只保存 Magpie 收到的 Key。它不会替用户注册、充值、领取试用额度或
+切换供应商渠道。
 
 开发时可直接安装当前目录：
 

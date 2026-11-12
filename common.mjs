@@ -248,6 +248,7 @@ export function createOpenAICompatibleImageProvider({
   generate,
   label,
   labelZh,
+  placeholder,
 }) {
   if (!id || !name || !base || !Array.isArray(models) || typeof generate !== "function") {
     throw new TypeError("image provider requires id, name, base, models and generate")
@@ -273,6 +274,7 @@ export function createOpenAICompatibleImageProvider({
           type: "api",
           label: authLabel,
           labels: { zh: authLabelZh },
+          ...(placeholder ? { placeholder } : {}),
         }],
         loader: async (getAuth) => ({
           baseURL: api,

@@ -3,8 +3,8 @@ const MODEL = "gemini-nano-banana-2.1"
 const DEFAULT_BASE = "https://api.site/v1beta"
 
 const text = {
-  en: "RightImage Gemini API key",
-  zh: "RightImage Gemini API Key",
+  en: "Right Code API key (rightapi.io)",
+  zh: "Right Code API Key（rightapi.io）",
 }
 
 function upstreamURL(requestURL, base, provider) {
@@ -42,7 +42,7 @@ async function RightImageProvider(input, options, provider) {
     config: async (cfg) => {
       cfg.provider ??= {}
       cfg.provider[provider] = {
-        name: "RightImage · Gemini",
+        name: "Right Code · Gemini",
         npm: "@ai-sdk/google",
         api: base,
         models: {
@@ -61,13 +61,14 @@ async function RightImageProvider(input, options, provider) {
           type: "api",
           label: text.en,
           labels: { zh: text.zh },
+          placeholder: "sk-…",
         },
       ],
       loader: async (getAuth) => ({
         baseURL: base,
         fetch: async (requestURL, init = {}) => {
           const auth = await getAuth()
-          if (auth?.type !== "api" || !auth.key) throw new Error("RightImage Gemini is not signed in")
+          if (auth?.type !== "api" || !auth.key) throw new Error("Right Code Gemini is not signed in")
           const headers = new Headers(init.headers)
           headers.delete("x-goog-api-key")
           headers.set("authorization", "Bearer " + auth.key)

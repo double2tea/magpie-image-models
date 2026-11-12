@@ -198,4 +198,5 @@ const provider = createOpenAICompatibleImageProvider({
   generate,
   label: "WaveSpeed API key",
   labelZh: "WaveSpeed API Key",
+  placeholder: "wsk_…",
 })

@@ -44,6 +44,7 @@ test("each provider exposes its standard API-key login without machine-specific 
     assert.equal(plugin.auth.methods[0].type, "api")
     assert.equal(plugin.auth.methods[0].authorize, undefined)
     assert.equal(plugin.auth.methods[0].keyless, undefined)
+    assert.match(plugin.auth.methods[0].placeholder, /^(sk-|wsk_)/)
   }
 })
 

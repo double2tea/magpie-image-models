@@ -157,4 +157,5 @@ const provider = createOpenAICompatibleImageProvider({
   generate,
   label: "12ai API key",
   labelZh: "12ai API Key",
+  placeholder: "sk-…",
 })
