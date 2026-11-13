@@ -5,13 +5,13 @@
 安装一次插件，再登录要用的渠道：
 
 ```bash
-magpie plugin add github:double2tea/magpie-image-models
+magpie plugin add github:double2tea/magpie-image-models#v0.4.1
 magpie plugin login image-models/rightimage
 magpie plugin login image-models/twelveai
 magpie plugin login image-models/wavespeed
 ```
 
-发布版本固定在 `v0.4.0`。登录时 Magpie 只询问该渠道的 API Key，并沿用
+发布版本固定在 `v0.4.1`。登录时 Magpie 只询问该渠道的 API Key，并沿用
 Magpie 自己的凭据存储。插件不读取环境变量、Keychain、私有配置文件或本机
 路径。只使用一个渠道时，只登录该渠道。
 
