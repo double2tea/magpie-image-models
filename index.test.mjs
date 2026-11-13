@@ -34,6 +34,15 @@ test("publishes three independent providers from one package", async () => {
   assert.ok(cfg.provider["image-models/wavespeed"].models["minimax/h3-image/text-to-image"])
 })
 
+test("onlyProvider enables one existing account without activating other provider accounts", async () => {
+  const cfg = {}
+  for (const factory of [RightImageGemini, TwelveAIImages, WaveSpeedImages]) {
+    const plugin = await factory({}, { onlyProvider: "image-models/rightimage" })
+    if (plugin.config) await plugin.config(cfg)
+  }
+  assert.deepEqual(Object.keys(cfg.provider), ["image-models/rightimage"])
+})
+
 test("provider catalogs and capabilities come from the machine-readable catalog", async () => {
   const cfg = { provider: {} }
   for (const factory of [RightImageGemini, TwelveAIImages, WaveSpeedImages]) {
@@ -113,8 +122,16 @@ test("RightImage maps the native Gemini image route to its configured base", asy
   const loader = await plugin.auth.loader(async () => ({ type: "api", key: "rightimage-key" }))
   let sent
   const restore = stubFetch(async (url, init) => {
-    sent = { url: String(url), headers: new Headers(init.headers) }
-    return Response.json({ candidates: [] })
+    if (String(url).endsWith(":generateContent")) {
+      sent = { url: String(url), headers: new Headers(init.headers) }
+      assert.equal(JSON.parse(init.body).async, true)
+      return Response.json({ task_id: "gemini-task" })
+    }
+    if (String(url).endsWith("/v1/tasks/gemini-task")) return Response.json({
+      candidates: [{ content: { parts: [{ text: "https://cdn.test/gemini.png" }] } }],
+    })
+    assert.equal(new Headers(init.headers).get("authorization"), null)
+    return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), { headers: { "content-type": "image/png" } })
   })
   try {
     const response = await loader.fetch(
@@ -128,6 +145,93 @@ test("RightImage maps the native Gemini image route to its configured base", asy
   } finally {
     restore()
   }
+})
+
+test("Right Code keeps four JSON and multipart reference images through asynchronous generation", async () => {
+  const plugin = await RightImageGemini({}, { baseURL: "https://rightimage.test/v1" })
+  const loader = await plugin.auth.loader(async () => ({ type: "api", key: "fixture" }))
+  for (const model of ["gemini-nano-banana-2.1", "gpt-image-2.6-flare"]) {
+    for (const multipart of [false, true]) {
+      const reference = "data:image/png;base64,iVBORw=="
+      const form = new FormData()
+      form.set("model", model)
+      form.set("prompt", "four reference fixture")
+      for (let index = 0; index < 4; index++) form.append("image[]", new Blob([Buffer.from("iVBORw==", "base64")], { type: "image/png" }), `${index}.png`)
+      const restore = stubFetch(async (url, init) => {
+        if (String(url).endsWith("/v1/tasks/task")) {
+          return Response.json(model.startsWith("gemini") ?
+            { candidates: [{ content: { parts: [{ text: "https://cdn.test/out.png" }] } }] } :
+            { data: [{ url: "https://cdn.test/out.png" }] })
+        }
+        if (String(url).startsWith("https://cdn.test")) {
+          assert.equal(new Headers(init.headers).get("authorization"), null)
+          return new Response(Buffer.from("iVBORw==", "base64"), { headers: { "content-type": "image/png" } })
+        }
+        const body = JSON.parse(init.body)
+        assert.equal(body.async, true)
+        if (model.startsWith("gemini")) {
+          assert.ok(String(url).endsWith(":generateContent"))
+          assert.deepEqual(body.contents[0].parts.slice(1), Array(4).fill({ inline_data: { mime_type: "image/png", data: "iVBORw==" } }))
+        } else {
+          assert.ok(String(url).endsWith("/images/edits"))
+          assert.deepEqual(body.images, Array(4).fill(reference))
+        }
+        return Response.json({ task_id: "task" })
+      })
+      try {
+        const response = await loader.fetch("https://rightimage.test/v1/images/edits", multipart ?
+          { method: "POST", body: form } : jsonRequest("", { model, prompt: "four reference fixture",
+            images: Array(4).fill({ image_url: reference }) })[1])
+        assert.equal(response.status, 200)
+        assert.equal((await response.json()).data.length, 1)
+      } finally { restore() }
+    }
+  }
+})
+
+test("configured new model IDs choose protocols by metadata and enforce their own reference limits", async () => {
+  for (const mode of ["gemini", "openai"]) {
+    const model = `future-${mode}-model`
+    const plugin = await RightImageGemini({}, { baseURL: "https://custom-host.test/v1", models: {
+      [model]: { name: "Future image", mode,
+        capabilities: { generate: true, edit: true, maxReferences: 6 } },
+    } })
+    const cfg = {}
+    await plugin.config(cfg)
+    assert.equal(cfg.provider["image-models/rightimage"].models[model].capabilities.maxReferences, 6)
+    const loader = await plugin.auth.loader(async () => ({ type: "api", key: "fixture" }))
+    const reference = "data:image/png;base64,iVBORw=="
+    let submits = 0
+    const restore = stubFetch(async (url, init) => {
+      if (String(url).endsWith("/v1/tasks/future")) {
+        return Response.json(mode === "gemini"
+          ? { candidates: [{ content: { parts: [{ text: "https://cdn.test/result.png" }] } }] }
+          : { data: [{ url: "https://cdn.test/result.png" }] })
+      }
+      if (String(url).startsWith("https://cdn.test")) {
+        return new Response(Buffer.from("iVBORw==", "base64"), { headers: { "content-type": "image/png" } })
+      }
+      submits++
+      const body = JSON.parse(init.body)
+      if (mode === "gemini") {
+        assert.equal(String(url), `https://custom-host.test/v1beta/models/${model}:generateContent`)
+        assert.equal(body.contents[0].parts.length, 7)
+      } else {
+        assert.equal(String(url), "https://custom-host.test/v1/images/edits")
+        assert.deepEqual(body.images, Array(6).fill(reference))
+      }
+      return Response.json({ task_id: "future" })
+    })
+    try {
+      const send = (count) => loader.fetch("plugin://images/v1/images/edits", jsonRequest("", {
+        model, prompt: "fixture", images: Array(count).fill({ image_url: { url: reference } }),
+      })[1])
+      assert.equal((await send(6)).status, 200)
+      assert.equal((await send(7)).status, 400)
+      assert.equal(submits, 1)
+    } finally { restore() }
+  }
+  await assert.rejects(RightImageGemini({}, { models: { unknown: { name: "Missing protocol" } } }), /Invalid image model/)
 })
 
 test("12ai submits, polls and downloads through the ordinary image route", async () => {

@@ -165,6 +165,9 @@ export function imageRefs(fields, files) {
     for (const item of listValue(value)) {
       if (typeof item === "string") refs.push({ kind: "value", value: item })
       else if (item && typeof item.url === "string") refs.push({ kind: "value", value: item.url })
+      else if (item && typeof item.image_url === "string") refs.push({ kind: "value", value: item.image_url })
+      else if (item && typeof item.image_url?.url === "string") refs.push({ kind: "value", value: item.image_url.url })
+      else throw Object.assign(new Error("Invalid reference image entry"), { status: 400 })
     }
   }
   return refs
@@ -335,7 +338,7 @@ export function imageModel(id, name, capabilities) {
     reasoning: false,
     tool_call: false,
     attachment: true,
-    modalities: { input: ["text", "image"], output: ["image"] },
+    modalities: { input: capabilities?.edit ? ["text", "image"] : ["text"], output: ["image"] },
     limit: { context: 0, output: 0 },
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
     variants: {},

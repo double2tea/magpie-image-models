@@ -72,6 +72,29 @@ magpie tool generate_image \
 4. 声明三项渠道函数：提交、查询、结果提取。
 
 不替换已有 `rightimage`、`generation-service` 或 Magpie 默认图片路由。
+
+Right Code 来源支持标准图片生成／编辑和 Gemini 原生接口，异步任务完成后统一返回图片。
+JSON 与 multipart 参考图均由来源插件转换；Design 无需了解供应商协议。
+目录内未知的参考图数量以 `null` 表示，不把“四张测试通过”写成供应商上限。
+
+可在 Magpie 插件选项中通过 `models` 补充新模型或修正已核实的能力；`mode`
+明确选择 `gemini` 或 `openai`，不通过模型名猜测协议。示例中的模型与数量仅作格式说明：
+
+```json
+{
+  "baseURL": "https://your-provider.example/v1",
+  "models": {
+    "new-image-model": {
+      "name": "New Image Model",
+      "mode": "openai",
+      "capabilities": { "generate": true, "edit": true, "maxReferences": 6 }
+    }
+  }
+}
+```
+
+能力声明进入共享供应商配置，Design 桥接插件可自动读取参考图数量。
+新接口协议仍须由来源插件实现；仅添加模型名不能证明接口兼容。
 一个渠道的凭据或故障不会影响其他渠道。
 
 从早期三个独立插件迁移时，重新安装本包并登录新 provider 即可：
