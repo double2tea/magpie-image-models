@@ -11,22 +11,21 @@ import {
   readImageRequest,
   requestFields,
   requestFiles,
-  sizeInfo,
   validateImageRequest,
 } from "../common.mjs"
 import { modelCapabilities, modelEntries } from "../catalog.mjs"
 
 const PROVIDER = "image-models/twelveai"
 const BASE = "https://cdn.12ai.org"
-const MODELS = modelEntries(PROVIDER).map(([id, name]) => [id, name, modelCapabilities(PROVIDER, id)])
+const MODELS = modelEntries(PROVIDER).map(([id, name]) => [id, name, modelCapabilities(PROVIDER, id),
+  { size: id.startsWith("gemini-") ? "aspect-resolution" : "pixels" }])
 
 function isGemini(model) {
   return model.startsWith("gemini-")
 }
 
-function buildInput(fields, files, model) {
+function buildInput(fields, files, model, size) {
   const input = { prompt: String(fields.prompt || "") }
-  if (!input.prompt.trim()) throw Object.assign(new Error("prompt is required"), { status: 400 })
   const refs = imageRefs(fields, files)
   if (refs.length) {
     input.images = refs.map((ref) => {
@@ -35,16 +34,17 @@ function buildInput(fields, files, model) {
       throw Object.assign(new Error("reference images must be HTTPS URLs or data URIs"), { status: 400 })
     })
   }
-  const size = sizeInfo(fields.size)
   if (isGemini(model)) {
     const aspect = fields.aspect_ratio || fields.aspectRatio || size?.aspect
-    const imageSize = fields.image_size || fields.imageSize || size?.tier
+    const imageSize = fields.resolution || fields.image_size || fields.imageSize || size?.tier
     if (aspect) input.aspect_ratio = aspect
     if (imageSize) input.image_size = imageSize
   } else {
     for (const key of ["size", "quality", "background", "output_format"]) {
       if (fields[key] !== undefined && fields[key] !== "") input[key] = fields[key]
     }
+    if (size?.width) input.size = `${size.width}x${size.height}`
+    if (fields.output_format) input.output_format = String(fields.output_format).toLowerCase()
     for (const key of ["n", "frame_count", "frame_duration_ms"]) {
       if (fields[key] === undefined || fields[key] === "") continue
       const value = Number(fields[key])
@@ -53,7 +53,7 @@ function buildInput(fields, files, model) {
     }
     const mask = maskFile(files)
     if (mask) input.mask = dataURI(mask.bytes, mask.mime)
-    else if (typeof fields.mask === "string" && fields.mask) input.mask = fields.mask
+    else if (fields.mask || fields.mask_url) input.mask = fields.mask || fields.mask_url
     const markup = fileByField(files, "markup")
     if (markup) input.markup = dataURI(markup.bytes, markup.mime)
     else if (typeof fields.markup === "string" && fields.markup) input.markup = fields.markup
@@ -119,12 +119,14 @@ async function generate({ requestURL, init, key, provider, base }) {
   }
   if ((init.method || "POST").toUpperCase() !== "POST") return errorResponse(405, "use POST to generate an image")
   const fields = requestFields(request)
+  if (fields.complexity) return errorResponse(400, "12ai complexity support is not verified through this plugin")
   const model = String(fields.model || "").trim()
   if (!MODELS.some(([id]) => id === model)) return errorResponse(400, `choose one of the ${provider} models`)
   const files = requestFiles(request)
   const capabilities = modelCapabilities(provider, model)
-  validateImageRequest({ provider, model, fields, files, capabilities })
-  const input = buildInput(fields, files, model)
+  const { size } = validateImageRequest({ provider, model, fields, files, capabilities,
+    sizeMode: isGemini(model) ? "aspect-resolution" : "pixels", requestPath: request.path })
+  const input = buildInput(fields, files, model, size)
   const submitted = await postJSON(`${base}/v1/task/submit`, key, { model, input }, init.signal)
   const taskId = submitted.id || submitted.task_id
   if (!taskId) throw new Error("12ai returned no task id")

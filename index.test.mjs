@@ -16,6 +16,8 @@ test("declared image controls and composite sizes remain portable across model n
   assert.deepEqual(sizeInfo("16:9@2K"), { aspect: "16:9", tier: "2K" })
   assert.deepEqual(sizeInfo("auto@1.5K"), { aspect: undefined, tier: "1.5K" })
   assert.deepEqual(sizeInfo("1:1@auto"), { aspect: "1:1", tier: undefined })
+  assert.deepEqual(sizeInfo("16:9"), { aspect: "16:9", tier: undefined })
+  assert.deepEqual(sizeInfo("2k"), { aspect: undefined, tier: "2K" })
   assert.deepEqual(imageModel("other", "Other", {}).supported_parameters, {})
 })
 
@@ -47,6 +49,8 @@ test("publishes three independent providers from one package", async () => {
   assert.ok(cfg.provider["image-models/rightimage"].models["gemini-nano-banana-2.1"])
   assert.ok(cfg.provider["image-models/twelveai"].models["gpt-image-2.6-flare"])
   assert.ok(cfg.provider["image-models/wavespeed"].models["minimax/h3-image/text-to-image"])
+  assert.deepEqual(cfg.provider["image-models/wavespeed"].models["bytedance/seedream-v5.5"].media_request,
+    { size: "aspect-resolution" })
 })
 
 test("onlyProvider enables one existing account without activating other provider accounts", async () => {
@@ -259,6 +263,8 @@ test("12ai submits, polls and downloads through the ordinary image route", async
       const body = JSON.parse(init.body)
       assert.equal(body.model, "gpt-image-2.6-flare")
       assert.equal(body.input.n, 1)
+      assert.equal(body.input.mask, "https://cdn.test/mask.png")
+      assert.equal(body.input.output_format, "png")
       return Response.json({ id: "task-1" })
     }
     if (String(url) === "https://twelve.test/v1/task/task-1") {
@@ -279,6 +285,9 @@ test("12ai submits, polls and downloads through the ordinary image route", async
         prompt: "coastal still life",
         size: "1536x1024",
         n: "1",
+        image: "https://cdn.test/source.png",
+        mask_url: "https://cdn.test/mask.png",
+        output_format: "PNG",
       })[1],
     )
     const value = await response.json()
@@ -372,6 +381,8 @@ test("WaveSpeed uploads a reference, selects the edit endpoint and downloads the
     if (String(url) === "https://wavespeed.test/api/v3/bytedance/seedream-v5.5/edit") {
       const body = JSON.parse(init.body)
       assert.deepEqual(body.images, ["https://storage.test/reference.png"])
+      assert.equal(body.aspect_ratio, "16:9")
+      assert.equal(body.resolution, "2k")
       return Response.json({ data: { id: "prediction-1" } })
     }
     if (String(url) === "https://wavespeed.test/api/v3/predictions/prediction-1/result") {
@@ -406,6 +417,79 @@ test("WaveSpeed uploads a reference, selects the edit endpoint and downloads the
   }
 })
 
+test("WaveSpeed maps Magpie size without inventing a resolution", async () => {
+  const plugin = await WaveSpeedImages({}, { baseURL: "https://wavespeed.test" })
+  const loader = await plugin.auth.loader(async () => ({ type: "api", key: "fixture" }))
+  const submitted = []
+  const restore = stubFetch(async (url, init) => {
+    if (String(url).endsWith("/api/v3/bytedance/seedream-v5.5")) {
+      submitted.push(JSON.parse(init.body))
+      return Response.json({ data: { id: "prediction" } })
+    }
+    if (String(url).endsWith("/result")) return Response.json({
+      data: { status: "completed", outputs: ["https://cdn.test/image.png"] },
+    })
+    return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+      headers: { "content-type": "image/png" },
+    })
+  })
+  try {
+    for (const size of ["16:9", "16:9@2K", "2K", "2048x1152"]) {
+      const response = await loader.fetch("plugin://image-models/v1/images/generations",
+        jsonRequest("", { model: "bytedance/seedream-v5.5", prompt: "test", size, n: 1 })[1])
+      assert.equal(response.status, 200)
+    }
+    assert.deepEqual(submitted.map(({ aspect_ratio, resolution }) => ({ aspect_ratio, resolution })), [
+      { aspect_ratio: "16:9", resolution: undefined },
+      { aspect_ratio: "16:9", resolution: "2k" },
+      { aspect_ratio: undefined, resolution: "2k" },
+      { aspect_ratio: "16:9", resolution: "2k" },
+    ])
+  } finally { restore() }
+})
+
+test("Gemini providers convert composite sizes while GPT keeps pixel sizes", async () => {
+  for (const factory of [RightImageGemini, TwelveAIImages]) {
+    const plugin = await factory({}, { baseURL: "https://provider.test" })
+    const loader = await plugin.auth.loader(async () => ({ type: "api", key: "fixture" }))
+    for (const model of ["gemini-nano-banana-2.1", "gpt-image-2.6-flare"]) {
+      let submitted
+      const restore = stubFetch(async (url, init) => {
+        if (String(url).startsWith("https://cdn.test")) {
+          return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+            headers: { "content-type": "image/png" },
+          })
+        }
+        if (init.body) {
+          submitted = JSON.parse(init.body)
+          return Response.json({ id: "task", task_id: "task" })
+        }
+        if (factory === TwelveAIImages) {
+          return Response.json({ status: "completed", outputs: ["https://cdn.test/image.png"] })
+        }
+        if (model.startsWith("gemini-")) {
+          return Response.json({ candidates: [{ content: { parts: [{ text: "https://cdn.test/image.png" }] } }] })
+        }
+        return Response.json({ data: [{ url: "https://cdn.test/image.png" }] })
+      })
+      try {
+        const size = model.startsWith("gemini-") ? "16:9@2K" : "1536×1024"
+        const response = await loader.fetch("https://provider.test/v1/images/generations",
+          jsonRequest("", { model, prompt: "test", size })[1])
+        assert.equal(response.status, 200)
+        if (factory === TwelveAIImages && model.startsWith("gemini-")) {
+          assert.equal(submitted.input.aspect_ratio, "16:9")
+          assert.equal(submitted.input.image_size, "2K")
+        } else if (model.startsWith("gemini-")) {
+          assert.deepEqual(submitted.generationConfig.imageConfig, { aspectRatio: "16:9", imageSize: "2K" })
+        } else {
+          assert.equal((submitted.input || submitted).size, "1536x1024")
+        }
+      } finally { restore() }
+    }
+  }
+})
+
 test("WaveSpeed rejects unsupported tiers and edit-only calls without references", async () => {
   const plugin = await WaveSpeedImages({}, { baseURL: "https://wavespeed.test" })
   const loader = await plugin.auth.loader(async () => ({ type: "api", key: "wavespeed-key" }))
@@ -428,6 +512,11 @@ test("WaveSpeed rejects unsupported tiers and edit-only calls without references
         prompt: "test",
         output_format: "gif",
       }, /output_format/],
+      [{ model: "bytedance/seedream-v5.5", prompt: "test", size: "garbage" }, /size must/],
+      [{ model: "bytedance/seedream-v5.5", prompt: "test", n: 2 }, /one image/],
+      [{ model: "minimax/h3-image/text-to-image", prompt: "test", quality: "high" }, /quality/],
+      [{ model: "minimax/h3-image/text-to-image", prompt: "test", background: "transparent" }, /background/],
+      [{ model: "bytedance/seedream-v5.5", prompt: "test", edit_precision: "high" }, /edit_precision/],
     ]
     for (const [body, pattern] of cases) {
       const response = await loader.fetch(
@@ -439,6 +528,114 @@ test("WaveSpeed rejects unsupported tiers and edit-only calls without references
     }
   } finally {
     restore()
+  }
+})
+
+test("size validation rejects converted mask conflicts and malformed edits before any network call", async () => {
+  const cases = [
+    [WaveSpeedImages, { model: "ideogram-ai/ideogram-v4.5/edit", size: "16:9",
+      mask_url: "https://cdn.test/mask.png" }, /omitting aspect_ratio/],
+    [WaveSpeedImages, { model: "ideogram-ai/ideogram-v4.5/edit", size: "16:9@auto",
+      edit_precision: "high" }, /omitting aspect_ratio/],
+    [WaveSpeedImages, { model: "bytedance/seedream-v5.5", size: "garbage" }, /size must/],
+    [RightImageGemini, { model: "gemini-nano-banana-2.1", size: "garbage" }, /size must/],
+    [TwelveAIImages, { model: "gemini-nano-banana-2.1", size: "garbage" }, /size must/],
+  ]
+  let calls = 0
+  const restore = stubFetch(async () => {
+    calls++
+    throw new Error("invalid requests must not upload or submit")
+  })
+  try {
+    for (const [factory, fields, pattern] of cases) {
+      const plugin = await factory({}, {})
+      const loader = await plugin.auth.loader(async () => ({ type: "api", key: "fixture" }))
+      const response = await loader.fetch("https://plugin.test/v1/images/edits",
+        jsonRequest("", { prompt: "edit", image: "data:image/png;base64,iVBORw==", ...fields })[1])
+      assert.equal(response.status, 400)
+      assert.match((await response.json()).error.message, pattern)
+    }
+    assert.equal(calls, 0)
+  } finally { restore() }
+})
+
+test("empty edits, zero pixel dimensions and unsupported Gemini counts never submit", async () => {
+  let calls = 0
+  const restore = stubFetch(async () => {
+    calls++
+    throw new Error("invalid requests must not submit")
+  })
+  try {
+    for (const [factory, model] of [
+      [RightImageGemini, "gpt-image-2.6-flare"],
+      [TwelveAIImages, "gpt-image-2.6-flare"],
+      [WaveSpeedImages, "bytedance/seedream-v5.5"],
+    ]) {
+      const plugin = await factory({}, {})
+      const loader = await plugin.auth.loader(async () => ({ type: "api", key: "fixture" }))
+      for (const [route, fields] of [
+        ["edits", {}],
+        ["generations", { size: "0x1024" }],
+        ["generations", { prompt: { text: "invalid" } }],
+      ]) {
+        const response = await loader.fetch(`https://plugin.test/v1/images/${route}`,
+          jsonRequest("", { model, prompt: "test", ...fields })[1])
+        assert.equal(response.status, 400)
+      }
+    }
+    const plugin = await RightImageGemini({}, {})
+    const loader = await plugin.auth.loader(async () => ({ type: "api", key: "fixture" }))
+    const response = await loader.fetch("https://plugin.test/v1/images/generations",
+      jsonRequest("", { model: "gemini-nano-banana-2.1", prompt: "test", n: 2 })[1])
+    assert.equal(response.status, 400)
+    const twelve = await TwelveAIImages({}, {})
+    const twelveLoader = await twelve.auth.loader(async () => ({ type: "api", key: "fixture" }))
+    const maskResponse = await twelveLoader.fetch("https://plugin.test/v1/images/generations",
+      jsonRequest("", { model: "gpt-image-2.6-flare", prompt: "test", mask_url: "https://cdn.test/mask.png" })[1])
+    assert.equal(maskResponse.status, 400)
+    assert.match((await maskResponse.json()).error.message, /requires a reference/)
+    assert.equal(calls, 0)
+  } finally { restore() }
+})
+
+test("explicit aspect and resolution aliases reach all three providers", async () => {
+  for (const [factory, model] of [
+    [RightImageGemini, "gemini-nano-banana-2.1"],
+    [TwelveAIImages, "gemini-nano-banana-2.1"],
+    [WaveSpeedImages, "bytedance/seedream-v5.5"],
+  ]) {
+    let submitted
+    const plugin = await factory({}, { baseURL: "https://provider.test" })
+    const loader = await plugin.auth.loader(async () => ({ type: "api", key: "fixture" }))
+    const restore = stubFetch(async (url, init) => {
+      if (init?.body) {
+        submitted = JSON.parse(init.body)
+        return Response.json({ id: "task", task_id: "task", data: { id: "task" } })
+      }
+      if (String(url).startsWith("https://cdn.test")) {
+        return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+          { headers: { "content-type": "image/png" } })
+      }
+      if (factory === RightImageGemini) {
+        return Response.json({ candidates: [{ content: { parts: [{ text: "https://cdn.test/image.png" }] } }] })
+      }
+      const result = { status: "completed", outputs: ["https://cdn.test/image.png"] }
+      return Response.json(factory === WaveSpeedImages ? { data: result } : result)
+    })
+    try {
+      const response = await loader.fetch("https://provider.test/v1/images/generations",
+        jsonRequest("", { model, prompt: "test", size: "1:1@1K", aspectRatio: "16:9", resolution: "2K" })[1])
+      assert.equal(response.status, 200)
+      if (factory === RightImageGemini) {
+        assert.deepEqual(submitted.generationConfig.imageConfig, { aspectRatio: "16:9", imageSize: "2K" })
+      } else if (factory === TwelveAIImages) {
+        assert.equal(submitted.input.aspect_ratio, "16:9")
+        assert.equal(submitted.input.image_size, "2K")
+      } else {
+        assert.equal(submitted.aspect_ratio, "16:9")
+        assert.equal(submitted.resolution, "2k")
+      }
+    } finally { restore() }
   }
 })
 

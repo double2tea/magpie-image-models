@@ -2,7 +2,7 @@ import { CATALOG } from "../catalog.mjs"
 import {
   createOpenAICompatibleImageProvider, dataURI, downloadAsBase64, errorResponse,
   fetchBytes, imageRefs, jsonResponse, parseDataURI, pollUntil, readImageRequest,
-  requestFields, requestFiles, sizeInfo, validateImageRequest,
+  requestFields, requestFiles, validateImageRequest,
 } from "../common.mjs"
 
 const providerID = "image-models/rightimage"
@@ -33,15 +33,19 @@ async function generate({ requestURL, init, key, base, definitions }) {
       return errorResponse(404, "Use /v1/images/generations or /v1/images/edits")
     }
     const fields = requestFields(request)
+    if (fields.complexity) return errorResponse(400, "Right Code complexity support is not verified through this plugin")
     const files = requestFiles(request)
     model = String(fields.model || "")
     definition = definitions[model]
     const capabilities = definition?.capabilities
-    validateImageRequest({ provider: providerID, model, fields, files, capabilities })
-    if (typeof fields.prompt !== "string" || !fields.prompt.trim()) return errorResponse(400, "prompt is required")
+    const { size } = validateImageRequest({ provider: providerID, model, fields, files, capabilities,
+      sizeMode: definition?.mode === "gemini" ? "aspect-resolution" : "pixels", requestPath: request.path })
     const references = imageRefs(fields, files)
-    if (request.path.endsWith("/edits") && !references.length) return errorResponse(400, "Image editing requires reference images")
+    if (fields.n !== undefined && (!Number.isInteger(Number(fields.n)) || Number(fields.n) < 1)) {
+      return errorResponse(400, "n must be a positive integer")
+    }
     if (definition.mode === "gemini") {
+      if (fields.n !== undefined && Number(fields.n) !== 1) return errorResponse(400, "Right Code Gemini supports one image per request through this plugin")
       const parts = [{ text: fields.prompt }]
       for (const reference of references) {
         const image = reference.kind === "bytes" ? reference :
@@ -51,14 +55,17 @@ async function generate({ requestURL, init, key, base, definitions }) {
         parts.push({ inline_data: { mime_type: image.mime, data: Buffer.from(image.bytes).toString("base64") } })
       }
       body = { async: true, contents: [{ role: "user", parts }] }
-      const size = sizeInfo(fields.size)
-      if (size) body.generationConfig = { imageConfig: { aspectRatio: size.aspect, imageSize: size.tier } }
+      const aspectRatio = fields.aspect_ratio || fields.aspectRatio || size?.aspect
+      const imageSize = fields.resolution || fields.image_size || fields.imageSize || size?.tier
+      if (aspectRatio || imageSize) body.generationConfig = { imageConfig: { aspectRatio, imageSize } }
       endpoint = `/v1beta/models/${encodeURIComponent(model)}:generateContent`
     } else {
       body = { model, prompt: fields.prompt, async: true, n: Number(fields.n ?? 1) }
       for (const field of ["size", "quality", "background", "output_format"]) {
         if (fields[field]) body[field] = fields[field]
       }
+      if (size?.width) body.size = `${size.width}x${size.height}`
+      if (fields.output_format) body.output_format = String(fields.output_format).toLowerCase()
       if (references.length) body.images = references.map((reference) =>
         reference.kind === "bytes" ? dataURI(reference.bytes, reference.mime) : reference.value)
       endpoint = references.length ? "/v1/images/edits" : "/v1/images/generations"

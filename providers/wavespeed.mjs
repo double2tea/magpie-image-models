@@ -15,15 +15,14 @@ import {
   readImageRequest,
   requestFields,
   requestFiles,
-  resolutionFor,
-  sizeInfo,
   validateImageRequest,
 } from "../common.mjs"
 import { modelCapabilities, modelEntries } from "../catalog.mjs"
 
 const PROVIDER = "image-models/wavespeed"
 const BASE = "https://api.wavespeed.ai"
-const MODELS = modelEntries(PROVIDER).map(([id, name]) => [id, name, modelCapabilities(PROVIDER, id)])
+const MODELS = modelEntries(PROVIDER).map(([id, name]) => [id, name, modelCapabilities(PROVIDER, id),
+  { size: "aspect-resolution" }])
 
 function endpointFor(model, hasImages) {
   const editModel = modelCapabilities(PROVIDER, model).editModel
@@ -36,10 +35,6 @@ function modelKind(model) {
   if (model.includes("seedream")) return "seedream"
   if (model.includes("h3-image")) return "h3"
   return "flux"
-}
-
-function allowedResolutions(model) {
-  return modelCapabilities(PROVIDER, model).resolutions || []
 }
 
 async function httpJSON(url, key, { method = "GET", body, signal } = {}) {
@@ -124,16 +119,14 @@ function mimeOf(file) {
   return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif" })[ext] || "application/octet-stream"
 }
 
-function buildBody(model, fields, urls) {
+function buildBody(model, fields, urls, size) {
   const kind = modelKind(model)
   const body = { prompt: String(fields.prompt || "") }
-  if (!body.prompt.trim()) throw Object.assign(new Error("prompt is required"), { status: 400 })
-  const size = sizeInfo(fields.size)
   const aspect = fields.aspect_ratio || fields.aspectRatio || size?.aspect
   if (aspect) body.aspect_ratio = aspect
-  const resolution = resolutionFor(fields.resolution || fields.size, allowedResolutions(model), "1K")
-  if (resolution) body.resolution = resolution.toLowerCase()
-  if (fields.output_format) body.output_format = fields.output_format
+  const resolution = fields.resolution || fields.image_size || fields.imageSize || size?.tier
+  if (resolution) body.resolution = String(resolution).toLowerCase()
+  if (fields.output_format) body.output_format = String(fields.output_format).toLowerCase()
   if (fields.enable_prompt_expansion !== undefined) body.enable_prompt_expansion = fields.enable_prompt_expansion === true || fields.enable_prompt_expansion === "true"
   if (kind === "ideogram" && fields.quality) body.quality = fields.quality
   if (kind === "seedream" && fields.background) body.background = fields.background
@@ -160,18 +153,24 @@ async function generate({ requestURL, init, key, provider, base }) {
   }
   if ((init.method || "POST").toUpperCase() !== "POST") return errorResponse(405, "use POST to generate an image")
   const fields = requestFields(request)
+  if (fields.n !== undefined && Number(fields.n) !== 1) return errorResponse(400, "WaveSpeed supports one image per request through this plugin")
+  if (fields.complexity) return errorResponse(400, "WaveSpeed does not support the Magpie complexity parameter through this plugin")
   const requestedModel = String(fields.model || "").trim()
   if (!MODELS.some(([id]) => id === requestedModel)) return errorResponse(400, `choose one of the ${provider} models`)
   const files = requestFiles(request)
   const refs = imageRefs(fields, files)
   const model = endpointFor(requestedModel, refs.length > 0)
   const capabilities = modelCapabilities(provider, model)
-  validateImageRequest({ provider, model, fields, files, capabilities })
+  if (fields.edit_precision && !capabilities.editPrecision) {
+    return errorResponse(400, `${provider} model ${model} does not support edit_precision`)
+  }
+  const { size } = validateImageRequest({ provider, model, fields, files, capabilities,
+    sizeMode: "aspect-resolution", requestPath: request.path })
   const urls = await resolveRefs(refs, base, key, init.signal)
-  const body = buildBody(model, fields, urls)
+  const body = buildBody(model, fields, urls, size)
   const mask = fileByField(files, "mask")
   if (mask) body.mask_url = await resolveImage(dataURI(mask.bytes, mask.mime), base, key, init.signal)
-  else if (fields.mask_url) body.mask_url = await resolveImage(fields.mask_url, base, key, init.signal)
+  else if (fields.mask_url || fields.mask) body.mask_url = await resolveImage(fields.mask_url || fields.mask, base, key, init.signal)
   const submitted = await httpJSON(`${base}/api/v3/${model}`, key, { method: "POST", body, signal: init.signal })
   const taskId = submitted.id
   if (!taskId) throw new Error("WaveSpeed returned no prediction id")

@@ -178,10 +178,17 @@ export function maskFile(files) {
 }
 
 export function sizeInfo(value) {
-  const setting = /^(auto|[1-9]\d*(?:\.\d+)?:[1-9]\d*(?:\.\d+)?)@(auto|\d+(?:\.\d+)?K)$/.exec(String(value ?? ""))
-  if (setting) return { aspect: setting[1] === "auto" ? undefined : setting[1],
-    tier: setting[2] === "auto" ? undefined : setting[2] }
-  const match = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(String(value || "").trim())
+  const input = String(value ?? "").trim()
+  const setting = /^(auto|[1-9]\d*(?:\.\d+)?:[1-9]\d*(?:\.\d+)?)@(auto|\d+(?:\.\d+)?K)$/i.exec(input)
+  if (setting) {
+    return {
+      aspect: setting[1].toLowerCase() === "auto" ? undefined : setting[1],
+      tier: setting[2].toLowerCase() === "auto" ? undefined : setting[2].toUpperCase(),
+    }
+  }
+  if (/^[1-9]\d*(?:\.\d+)?:[1-9]\d*(?:\.\d+)?$/.test(input)) return { aspect: input, tier: undefined }
+  if (/^\d+(?:\.\d+)?K$/i.test(input)) return { aspect: undefined, tier: input.toUpperCase() }
+  const match = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(input)
   if (!match) return null
   const width = Number(match[1])
   const height = Number(match[2])
@@ -196,19 +203,25 @@ export function sizeInfo(value) {
   }
 }
 
-export function resolutionFor(value, allowed, fallback = "") {
-  const info = sizeInfo(value)
-  const tier = String(info?.tier || value || "").trim().toUpperCase()
-  const match = allowed.find((item) => String(item).toUpperCase() === tier)
-  return match || fallback
-}
-
-export function validateImageRequest({ provider, model, fields, files, capabilities }) {
+export function validateImageRequest({ provider, model, fields, files, capabilities, sizeMode, requestPath }) {
   if (!capabilities) throw Object.assign(new Error(`unknown model for ${provider}: ${model}`), { status: 400 })
-  if (!String(fields.prompt || "").trim()) throw Object.assign(new Error("prompt is required"), { status: 400 })
+  if (typeof fields.prompt !== "string" || !fields.prompt.trim()) throw Object.assign(new Error("prompt must be a non-empty string"), { status: 400 })
+  const size = sizeInfo(fields.size)
+  if (fields.size && fields.size !== "auto") {
+    if (sizeMode === "aspect-resolution" && !size) {
+      throw Object.assign(new Error("size must be pixels, an aspect ratio, a resolution tier or ratio@tier"), { status: 400 })
+    }
+    if (sizeMode === "pixels" && !size?.width) {
+      throw Object.assign(new Error(`${provider} image size must be WIDTHxHEIGHT or auto`), { status: 400 })
+    }
+  }
+  const aspect = fields.aspect_ratio || fields.aspectRatio || size?.aspect
   const refs = imageRefs(fields, files)
   const hasMask = Boolean(fileByField(files, "mask") || fields.mask || fields.mask_url)
   const hasMarkup = Boolean(fileByField(files, "markup") || fields.markup)
+  if (requestPath?.endsWith("/edits") && !refs.length) {
+    throw Object.assign(new Error("Image editing requires reference images"), { status: 400 })
+  }
   if (!capabilities.generate && !refs.length) {
     throw Object.assign(new Error(`${provider} model ${model} is an edit-only endpoint`), { status: 400 })
   }
@@ -223,6 +236,9 @@ export function validateImageRequest({ provider, model, fields, files, capabilit
   }
   if (hasMask && !capabilities.mask) {
     throw Object.assign(new Error(`${provider} model ${model} does not support mask editing`), { status: 400 })
+  }
+  if (hasMask && !refs.length) {
+    throw Object.assign(new Error("mask editing requires a reference image"), { status: 400 })
   }
   if (hasMarkup && !capabilities.markup) {
     throw Object.assign(new Error(`${provider} model ${model} does not support markup editing`), { status: 400 })
@@ -252,23 +268,21 @@ export function validateImageRequest({ provider, model, fields, files, capabilit
     throw Object.assign(new Error(`${provider} model ${model} does not support prompt expansion`), { status: 400 })
   }
   if (Array.isArray(capabilities.resolutions)) {
-    const info = sizeInfo(fields.size)
-    const requested = String(fields.resolution || fields.image_size || fields.imageSize || info?.tier || "").toUpperCase()
+    const requested = String(fields.resolution || fields.image_size || fields.imageSize || size?.tier || "").toUpperCase()
     if (requested && !capabilities.resolutions.some((item) => String(item).toUpperCase() === requested)) {
       throw Object.assign(new Error(`${provider} model ${model} supports resolutions ${capabilities.resolutions.join(", ")}`), { status: 400 })
     }
   }
   if (Array.isArray(capabilities.aspectRatios)) {
-    const info = sizeInfo(fields.size)
-    const requested = String(fields.aspect_ratio || fields.aspectRatio || info?.aspect || "")
+    const requested = String(aspect || "")
     if (requested && !capabilities.aspectRatios.includes(requested)) {
       throw Object.assign(new Error(`${provider} model ${model} does not support aspect ratio ${requested}`), { status: 400 })
     }
   }
-  if (fields.edit_precision === "high" && capabilities.omitAspectRatioWithHighPrecision && fields.aspect_ratio) {
+  if (fields.edit_precision === "high" && capabilities.omitAspectRatioWithHighPrecision && aspect) {
     throw Object.assign(new Error(`${provider} model ${model} requires omitting aspect_ratio with high edit precision`), { status: 400 })
   }
-  if (hasMask && capabilities.omitAspectRatioWithMask && fields.aspect_ratio) {
+  if (hasMask && capabilities.omitAspectRatioWithMask && aspect) {
     throw Object.assign(new Error(`${provider} model ${model} requires omitting aspect_ratio with a mask`), { status: 400 })
   }
   if (fields.output_format && String(fields.output_format).toLowerCase() === "gif") {
@@ -288,7 +302,7 @@ export function validateImageRequest({ provider, model, fields, files, capabilit
   if (fields.background === "transparent" && fields.output_format && String(fields.output_format).toLowerCase() !== "png") {
     throw Object.assign(new Error("transparent background requires PNG output"), { status: 400 })
   }
-  return refs
+  return { refs, size }
 }
 
 export function sleep(ms, signal) {
