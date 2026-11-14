@@ -130,7 +130,8 @@ export async function RightImageGemini(input, options = {}) {
   }
   const provider = createOpenAICompatibleImageProvider({
     id: providerID, name: "Right Code Images", base: "https://api.site/v1",
-    models: Object.entries(definitions).map(([id, model]) => [id, model.name, model.capabilities]),
+    models: Object.entries(definitions).map(([id, model]) => [id, model.name, model.capabilities,
+      { size: model.mode === "gemini" ? "aspect-resolution" : "pixels" }]),
     generate: (request) => generate({ ...request, definitions }),
     label: "Right Code API key (rightapi.io)", labelZh: "Right Code API Key（rightapi.io）", placeholder: "sk-…",
   })

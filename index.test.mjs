@@ -3,6 +3,21 @@ import test from "node:test"
 
 import { CATALOG, modelCapabilities } from "./catalog.mjs"
 import { RightImageGemini, TwelveAIImages, WaveSpeedImages } from "./index.mjs"
+import { imageModel, sizeInfo } from "./common.mjs"
+
+test("declared image controls and composite sizes remain portable across model names", () => {
+  const model = imageModel("unknown-next", "Unknown next", {
+    aspectRatios: ["1:1", "16:9"], resolutions: ["1K", "2K"],
+    qualities: ["low", "high"], backgrounds: ["auto", "transparent", "opaque"],
+  }, { size: "aspect-resolution" })
+  assert.deepEqual(model.supported_parameters.background, { type: "enum", values: ["auto", "transparent", "opaque"] })
+  assert.deepEqual(model.supported_parameters.quality, { type: "enum", values: ["low", "high"] })
+  assert.deepEqual(model.media_request, { size: "aspect-resolution" })
+  assert.deepEqual(sizeInfo("16:9@2K"), { aspect: "16:9", tier: "2K" })
+  assert.deepEqual(sizeInfo("auto@1.5K"), { aspect: undefined, tier: "1.5K" })
+  assert.deepEqual(sizeInfo("1:1@auto"), { aspect: "1:1", tier: undefined })
+  assert.deepEqual(imageModel("other", "Other", {}).supported_parameters, {})
+})
 
 function jsonRequest(url, body) {
   return [url, {

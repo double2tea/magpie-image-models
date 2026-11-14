@@ -178,6 +178,9 @@ export function maskFile(files) {
 }
 
 export function sizeInfo(value) {
+  const setting = /^(auto|[1-9]\d*(?:\.\d+)?:[1-9]\d*(?:\.\d+)?)@(auto|\d+(?:\.\d+)?K)$/.exec(String(value ?? ""))
+  if (setting) return { aspect: setting[1] === "auto" ? undefined : setting[1],
+    tier: setting[2] === "auto" ? undefined : setting[2] }
   const match = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(String(value || "").trim())
   if (!match) return null
   const width = Number(match[1])
@@ -332,8 +335,14 @@ export async function downloadAsBase64(url, headers = {}, signal) {
   return { b64_json: Buffer.from(bytes).toString("base64"), media_type: mime }
 }
 
-export function imageModel(id, name, capabilities) {
+export function imageModel(id, name, capabilities, mediaRequest) {
+  const supported = {}
+  for (const [field, key] of [["aspectRatios", "aspect_ratio"], ["resolutions", "resolution"], ["sizes", "size"], ["qualities", "quality"], ["backgrounds", "background"]]) {
+    if (capabilities?.[field]?.length) supported[key] = { type: "enum", values: capabilities[field] }
+  }
   return {
+    supported_parameters: supported,
+    ...(mediaRequest ? { media_request: mediaRequest } : {}),
     name,
     reasoning: false,
     tool_call: false,
@@ -364,7 +373,8 @@ export function createOpenAICompatibleImageProvider({
   const authLabelZh = labelZh || authLabel
   return async function ImageProvider(_input, options = {}) {
     const api = typeof options.baseURL === "string" && options.baseURL ? options.baseURL : base
-    const catalog = Object.fromEntries(models.map(([modelId, modelName, capabilities]) => [modelId, imageModel(modelId, modelName, capabilities)]))
+    const catalog = Object.fromEntries(models.map(([modelId, modelName, capabilities, mediaRequest]) =>
+      [modelId, imageModel(modelId, modelName, capabilities, mediaRequest)]))
     return {
       config: async (cfg) => {
         cfg.provider ??= {}
